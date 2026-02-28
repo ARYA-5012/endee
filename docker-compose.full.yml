@@ -1,0 +1,68 @@
+# docker-compose.full.yml
+# ───────────────────────
+# Option B: Full stack — Endee + DevSearch app in a single compose file.
+#
+#   docker compose -f docker-compose.full.yml up --build
+#
+# DevSearch will be available at http://localhost:8501
+# Endee will be available at http://localhost:8080
+#
+# Required: copy .env.example to .env and fill in OPENROUTER_API_KEY
+
+version: "3.9"
+
+services:
+
+  # ── Vector database ─────────────────────────────────────────────────────────
+  endee:
+    image: endeeio/endee-server:latest
+    container_name: endee-server
+    ports:
+      - "8080:8080"
+    ulimits:
+      nofile: 100000
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200m"
+        max-file: "5"
+    environment:
+      NDD_NUM_THREADS: 0
+      NDD_AUTH_TOKEN: "${ENDEE_AUTH_TOKEN:-}"
+    volumes:
+      - endee-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── DevSearch Streamlit app ──────────────────────────────────────────────────
+  devsearch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: devsearch-app
+    ports:
+      - "8501:8501"
+    environment:
+      # Use Docker service name to reach Endee on the internal network
+      ENDEE_BASE_URL: "http://endee:8080/api/v1"
+      ENDEE_AUTH_TOKEN: "${ENDEE_AUTH_TOKEN:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"
+      OPENROUTER_MODEL: "${OPENROUTER_MODEL:-google/gemini-flash-1.5}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+    depends_on:
+      endee:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      # Mount model cache so the embedding model isn't re-downloaded on restart
+      - model-cache:/root/.cache/huggingface
+
+volumes:
+  endee-data:
+    driver: local
+  model-cache:
+    driver: local

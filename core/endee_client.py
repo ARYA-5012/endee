@@ -79,12 +79,21 @@ class DevSearchDB:
 
     # ── Index lifecycle ───────────────────────────────────────────────────────
     def index_name_for_repo(self, repo: str) -> str:
-        """Convert 'owner/repo' to a valid Endee index name."""
-        return repo.lower().replace("/", INDEX_SEP).replace(" ", "-")
+        """Convert 'owner/repo' to a valid Endee index name.
+        
+        Endee index names must be alphanumeric + underscores only.
+        We use triple-underscore as the owner/repo separator,
+        and replace hyphens with double-underscores.
+        """
+        return repo.lower().replace("/", INDEX_SEP).replace("-", "__")
 
     def repo_name_from_index(self, index_name: str) -> str:
         """Convert an Endee index name back to 'owner/repo'."""
-        return index_name.replace(INDEX_SEP, "/", 1)
+        # Restore hyphens first (double-underscore → hyphen),
+        # then restore the slash (triple-underscore → slash)
+        name = index_name.replace(INDEX_SEP, "/", 1)
+        name = name.replace("__", "-")
+        return name
 
     def index_exists(self, repo: str) -> bool:
         try:
@@ -112,7 +121,7 @@ class DevSearchDB:
                 name=name,
                 dimension=EMBEDDING_DIM,
                 space_type="cosine",
-                precision=self._Precision.INT8,
+                precision="float32",
             )
 
     def delete_index(self, repo: str) -> bool:

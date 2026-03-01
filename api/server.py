@@ -22,6 +22,7 @@ import os
 import sys
 import time
 import logging
+import traceback
 from typing import List, Optional, Any
 
 # Allow running from repo root
@@ -56,6 +57,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Global exception handler — always return JSON, never plain-text 500
+from fastapi.responses import JSONResponse
+from starlette.requests import Request
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    tb = traceback.format_exc()
+    logger.error(f"Unhandled exception: {exc}\n{tb}")
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -232,7 +243,11 @@ def ingest_repo(req: IngestRequest):
     if already_exists and req.force:
         db.delete_index(repo)
 
-    db.create_index(repo, skip_exists_check=True)
+    try:
+        db.create_index(repo, skip_exists_check=True)
+    except Exception as e:
+        logger.error(f"Failed to create index: {e}\n{traceback.format_exc()}")
+        raise HTTPException(502, f"Failed to create Endee index: {e}")
 
     # Fetch files
     t0 = time.time()

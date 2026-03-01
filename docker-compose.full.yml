@@ -15,7 +15,7 @@ services:
 
   # ── Vector database ─────────────────────────────────────────────────────────
   endee:
-    image: endeeio/endee:latest
+    image: endeeio/endee-server:latest
     container_name: devsearch-endee
     ports:
       - "8080:8080"

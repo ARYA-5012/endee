@@ -2,7 +2,7 @@
 app/pages/3_📦_Indexes.py
 ──────────────────────────
 Index management — view all indexed repositories and their stats,
-delete stale indexes, and re-index a repo.
+delete stale indexes via the FastAPI backend.
 """
 
 from __future__ import annotations
@@ -11,16 +11,15 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# Add app/ to path so styles module is importable
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import streamlit as st
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from core.endee_client import DevSearchDB
-
-# Add app/ to path so styles module is importable
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from styles import inject_css
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -32,15 +31,16 @@ inject_css(st)
 st.markdown("## 📦 Index Manager")
 st.markdown("View and manage all GitHub repositories indexed in Endee.")
 
-# ── Connect ───────────────────────────────────────────────────────────────────
-endee_url   = st.session_state.get("endee_url",   os.getenv("ENDEE_BASE_URL", "http://localhost:8080/api/v1"))
-endee_token = st.session_state.get("endee_token", os.getenv("ENDEE_AUTH_TOKEN", ""))
+# ── API config ────────────────────────────────────────────────────────────────
+API_BASE = st.session_state.get("api_url", os.getenv("DEVSEARCH_API_URL", "http://localhost:8000"))
 
+# ── Fetch indexes ─────────────────────────────────────────────────────────────
 try:
-    db      = DevSearchDB(base_url=endee_url, auth_token=endee_token or None)
-    indexes = db.list_indexes()
+    resp = requests.get(f"{API_BASE}/api/indexes", timeout=5)
+    resp.raise_for_status()
+    indexes = resp.json()
 except Exception as e:
-    st.error(f"❌ Cannot connect to Endee: {e}")
+    st.error(f"❌ Cannot connect to DevSearch API: {e}")
     st.stop()
 
 # ── Summary ───────────────────────────────────────────────────────────────────
@@ -48,10 +48,7 @@ if not indexes:
     st.info("No repositories indexed yet. Go to the **🏠 Home** page to add one.")
     st.stop()
 
-total_vecs = sum(
-    int(i.get("num_vectors", i.get("vector_count", 0)) or 0)
-    for i in indexes
-)
+total_vecs = sum(int(i.get("num_vectors", 0) or 0) for i in indexes)
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Total Indexes",  len(indexes))
@@ -62,23 +59,13 @@ st.markdown("---")
 
 # ── Index cards ───────────────────────────────────────────────────────────────
 for idx_info in indexes:
-    if isinstance(idx_info, dict):
-        name       = idx_info.get("name", "unknown")
-        num_vecs   = idx_info.get("num_vectors", idx_info.get("vector_count", "—"))
-        dimension  = idx_info.get("dimension", 384)
-        space_type = idx_info.get("space_type", "cosine")
-        precision  = idx_info.get("precision", "INT8")
-    else:
-        name       = getattr(idx_info, "name", "unknown")
-        num_vecs   = getattr(idx_info, "num_vectors", getattr(idx_info, "vector_count", "—"))
-        dimension  = getattr(idx_info, "dimension", 384)
-        space_type = getattr(idx_info, "space_type", "cosine")
-        precision  = getattr(idx_info, "precision", "INT8")
+    name         = idx_info.get("name", "unknown")
+    repo_display = idx_info.get("repo_display", name)
+    num_vecs     = idx_info.get("num_vectors", 0)
+    dimension    = idx_info.get("dimension", 384)
+    space_type   = idx_info.get("space_type", "cosine")
+    precision    = idx_info.get("precision", "INT8")
 
-    # Convert index name back to repo form
-    repo_display = db.repo_name_from_index(name)
-
-    # Safe formatting for num_vecs (may be string fallback)
     num_vecs_display = f"{int(num_vecs):,}" if isinstance(num_vecs, (int, float)) else str(num_vecs)
 
     st.markdown(
@@ -117,9 +104,19 @@ for idx_info in indexes:
         yes, no = st.columns(2)
         with yes:
             if st.button("Yes, delete", key=f"yes_{name}", type="primary"):
-                db.delete_index(repo_display)
+                try:
+                    # repo_display is "owner/repo" — split for the URL path
+                    del_resp = requests.delete(
+                        f"{API_BASE}/api/indexes/{repo_display}",
+                        timeout=10,
+                    )
+                    if del_resp.status_code == 200:
+                        st.success(f"Deleted {repo_display}")
+                    else:
+                        st.error(f"Delete failed: {del_resp.json().get('detail', del_resp.text)}")
+                except Exception as e:
+                    st.error(f"Delete failed: {e}")
                 st.session_state.pop(f"confirm_delete_{name}", None)
-                st.success(f"Deleted {repo_display}")
                 st.rerun()
         with no:
             if st.button("Cancel", key=f"no_{name}"):
@@ -129,16 +126,16 @@ for idx_info in indexes:
     st.markdown("")
 
 
-# ── Endee server info ─────────────────────────────────────────────────────────
+# ── API server info ───────────────────────────────────────────────────────────
 st.markdown("---")
-st.markdown("### ℹ️ Endee Server")
+st.markdown("### ℹ️ DevSearch API")
 st.code(
-    f"Base URL  : {endee_url}\n"
-    f"Auth      : {'enabled' if endee_token else 'disabled (open mode)'}\n"
-    f"Dashboard : {endee_url.replace('/api/v1', '')}",
+    f"API URL   : {API_BASE}\n"
+    f"Health    : {API_BASE}/api/health\n"
+    f"API Docs  : {API_BASE}/docs",
     language="text",
 )
 st.caption(
-    "The Endee dashboard is accessible at the URL above — "
-    "it shows index statistics, vector counts, and query performance metrics."
+    "The FastAPI interactive docs (Swagger UI) are accessible at the URL above — "
+    "you can test all endpoints directly from your browser."
 )

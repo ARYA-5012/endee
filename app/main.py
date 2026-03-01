@@ -1,7 +1,7 @@
 """
 app/main.py  ·  DevSearch — Semantic Code Intelligence
 ───────────────────────────────────────────────────────
-Home page: ingest a GitHub repository into Endee.
+Home page: ingest a GitHub repository into Endee via the FastAPI backend.
 
 Navigation (via Streamlit multi-page):
   🏠 Home (this page)   — ingest repos
@@ -19,16 +19,15 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import streamlit as st
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from core.chunker      import chunk_file
-from core.embedder     import embed_texts
-from core.endee_client import DevSearchDB
-from core.repo_loader  import fetch_repo_files, parse_github_url
-
 from styles import inject_css
+
+# ── Config ────────────────────────────────────────────────────────────────────
+API_BASE = os.getenv("DEVSEARCH_API_URL", "http://localhost:8000")
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -45,15 +44,10 @@ inject_css(st)
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Configuration")
-    endee_url = st.text_input(
-        "Endee Base URL",
-        value=os.getenv("ENDEE_BASE_URL", "http://localhost:8080/api/v1"),
-        help="URL of your running Endee server",
-    )
-    endee_token = st.text_input(
-        "Endee Auth Token (optional)",
-        value=os.getenv("ENDEE_AUTH_TOKEN", ""),
-        type="password",
+    api_url = st.text_input(
+        "API Base URL",
+        value=API_BASE,
+        help="URL of the DevSearch FastAPI server",
     )
     github_token = st.text_input(
         "GitHub Token (optional)",
@@ -69,22 +63,25 @@ with st.sidebar:
     )
 
     # Persist to session state so other pages can read them
-    st.session_state["endee_url"]       = endee_url
-    st.session_state["endee_token"]     = endee_token
+    st.session_state["api_url"]         = api_url
     st.session_state["github_token"]    = github_token
     st.session_state["openrouter_key"]  = openrouter_key
 
     st.divider()
-    # ── Endee connection status ───────────────────────────────────────────────
+    # ── API + Endee connection status ─────────────────────────────────────────
     try:
-        db = DevSearchDB(base_url=endee_url, auth_token=endee_token or None)
-        db.ping()  # Verify Endee is actually reachable
-        indexes = db.list_indexes()
-        st.success(f"✅ Endee connected  ({len(indexes)} index{'es' if len(indexes) != 1 else ''})")
-        st.session_state["db_ok"] = True
+        resp = requests.get(f"{api_url}/api/health", timeout=5)
+        data = resp.json()
+        if data.get("endee_connected"):
+            st.success(f"✅ API + Endee connected ({data['index_count']} indexes)")
+            st.session_state["db_ok"] = True
+        else:
+            st.warning(f"⚠️ API running, Endee unreachable")
+            st.caption(data.get("message", ""))
+            st.session_state["db_ok"] = False
     except Exception as e:
-        st.error("❌ Cannot reach Endee")
-        st.caption(str(e))
+        st.error("❌ Cannot reach DevSearch API")
+        st.caption(f"Is the API running at {api_url}? → {e}")
         st.session_state["db_ok"] = False
 
 
@@ -97,7 +94,7 @@ st.markdown(
 
 # Feature pills
 for label in ["⚡ Powered by Endee", "🧠 all-MiniLM-L6-v2", "🤖 Gemini Flash RAG",
-              "🐙 Any Public GitHub Repo", "🔎 384-dim Cosine Search"]:
+              "🐙 Any Public GitHub Repo", "🔎 384-dim Cosine Search", "🚀 FastAPI Backend"]:
     st.markdown(f'<span class="pill">{label}</span>', unsafe_allow_html=True)
 
 st.markdown("---")
@@ -106,11 +103,9 @@ st.markdown("---")
 # ── Stats row ─────────────────────────────────────────────────────────────────
 if st.session_state.get("db_ok"):
     try:
-        indexes = db.list_indexes()
-        total_vectors = sum(
-            int(i.get("num_vectors", i.get("vector_count", 0)) or 0)
-            for i in indexes
-        )
+        resp = requests.get(f"{api_url}/api/indexes", timeout=5)
+        indexes = resp.json()
+        total_vectors = sum(int(i.get("num_vectors", 0) or 0) for i in indexes)
         c1, c2, c3, c4 = st.columns(4)
         for col, num, label in [
             (c1, len(indexes),    "Indexed Repos"),
@@ -162,90 +157,49 @@ if ingest_btn:
         st.error("Endee is not reachable. Check the connection settings in the sidebar.")
         st.stop()
 
-    try:
-        owner, repo_name = parse_github_url(repo_url)
-        repo = f"{owner}/{repo_name}"
-    except ValueError as e:
-        st.error(str(e))
-        st.stop()
-
-    # ── Check existing index ──────────────────────────────────────────────────
-    db = DevSearchDB(
-        base_url=st.session_state["endee_url"],
-        auth_token=st.session_state["endee_token"] or None,
-    )
-
-    already_exists = db.index_exists(repo)  # single API call
-
-    if already_exists and not force_reindex:
-        st.info(f"✅ **{repo}** is already indexed! Head to the Search or Ask pages.")
-        st.stop()
-
-    if already_exists and force_reindex:
-        db.delete_index(repo)
-
-    db.create_index(repo, skip_exists_check=already_exists and force_reindex)
-
-    # ── Progress UI ───────────────────────────────────────────────────────────
-    st.markdown(f"#### Indexing `{repo}`")
-    phase_label = st.empty()
-    progress_bar = st.progress(0.0)
-    status_col1, status_col2, status_col3 = st.columns(3)
-    files_metric   = status_col1.empty()
-    chunks_metric  = status_col2.empty()
-    vectors_metric = status_col3.empty()
-
-    phase_label.markdown("**Phase 1 / 3 — Fetching files from GitHub…**")
-    files_metric.metric("Files", 0)
-    chunks_metric.metric("Chunks", 0)
-    vectors_metric.metric("Vectors", 0)
-
-    # Collect files + chunks
-    t0 = time.time()
-    all_chunks = []
-    file_count = 0
-
-    gh_token = st.session_state.get("github_token") or None
+    # ── Call FastAPI ingest endpoint ──────────────────────────────────────────
+    st.markdown(f"#### Indexing `{repo_url}`")
+    progress_label = st.empty()
+    progress_label.info("📥 Sending to API for ingestion... this may take a minute for large repos.")
 
     try:
-        for code_file, idx, total in fetch_repo_files(repo_url, gh_token):
-            file_count += 1
-            chunks = chunk_file(code_file)
-            all_chunks.extend(chunks)
-            progress_bar.progress(min(idx / total * 0.4, 0.4))
-            files_metric.metric("Files",  file_count)
-            chunks_metric.metric("Chunks", len(all_chunks))
+        resp = requests.post(
+            f"{api_url}/api/ingest",
+            json={
+                "github_url": repo_url,
+                "github_token": st.session_state.get("github_token") or None,
+                "force": force_reindex,
+            },
+            timeout=300,  # large repos may take a while
+        )
+
+        if resp.status_code == 409:
+            st.info(f"✅ This repo is already indexed! Head to the Search or Ask pages. Use 'Force re-index' to overwrite.")
+            st.stop()
+
+        if resp.status_code != 200:
+            error_detail = resp.json().get("detail", resp.text)
+            st.error(f"Ingestion failed: {error_detail}")
+            st.stop()
+
+        result = resp.json()
+        progress_label.empty()
+
+        st.success(
+            f"**{result['repo']}** is now indexed in Endee.\n\n"
+            f"- {result['files']} files processed\n"
+            f"- {result['chunks']} code chunks created\n"
+            f"- {result['vectors']} vectors stored\n"
+            f"- Completed in {result['elapsed_seconds']}s\n\n"
+            f"Head to the **🔍 Search** or **🤖 Ask** pages to explore the code!"
+        )
+
+    except requests.exceptions.Timeout:
+        st.error("Request timed out. The repo may be too large — try a smaller one.")
+    except requests.exceptions.ConnectionError:
+        st.error(f"Cannot reach the API at {api_url}. Is it running?")
     except Exception as e:
-        st.error(f"Failed to fetch repository: {e}")
-        st.stop()
-
-    if not all_chunks:
-        st.warning("No code files found. The repo may be empty or use unsupported languages.")
-        st.stop()
-
-    # Embed
-    phase_label.markdown("**Phase 2 / 3 — Embedding with all-MiniLM-L6-v2…**")
-    progress_bar.progress(0.4)
-    texts      = [c.code for c in all_chunks]
-    embeddings = embed_texts(texts)
-    progress_bar.progress(0.7)
-
-    # Upsert into Endee
-    phase_label.markdown("**Phase 3 / 3 — Storing vectors in Endee…**")
-    upserted = db.upsert_chunks(repo, all_chunks, embeddings)
-    progress_bar.progress(1.0)
-
-    elapsed = time.time() - t0
-    vectors_metric.metric("Vectors", upserted)
-    phase_label.markdown(f"✅ **Done in {elapsed:.1f}s!**")
-
-    st.success(
-        f"**{repo}** is now indexed in Endee.\n\n"
-        f"- {file_count} files processed\n"
-        f"- {len(all_chunks)} code chunks created\n"
-        f"- {upserted} vectors stored\n\n"
-        f"Head to the **🔍 Search** or **🤖 Ask** pages to explore the code!"
-    )
+        st.error(f"Unexpected error: {e}")
 
 
 # ── How it works ──────────────────────────────────────────────────────────────

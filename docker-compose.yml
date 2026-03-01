@@ -1,40 +1,32 @@
 # docker-compose.yml
 # ──────────────────
-# Option A: Run Endee via Docker, DevSearch app runs locally.
+# Option A: Run Endee via Docker, API + Streamlit run locally.
 #
 #   docker compose up -d
+#   uvicorn api.server:app --host 0.0.0.0 --port 8000 --reload
 #   streamlit run app/main.py
-#
-# Endee will be available at http://localhost:8080
-# Set ENDEE_BASE_URL=http://localhost:8080/api/v1 in your .env
 
 version: "3.9"
 
 services:
   endee:
-    image: endeeio/endee-server:latest
-    container_name: endee-server
+    image: endeeio/endee:latest
+    container_name: devsearch-endee
     ports:
       - "8080:8080"
-    ulimits:
-      nofile: 100000
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "200m"
-        max-file: "5"
     environment:
-      NDD_NUM_THREADS: 0 # 0 = auto-detect
-      NDD_AUTH_TOKEN: "" # Set a token for auth, leave empty for open mode
+      # Open mode (no token) — set NDD_AUTH_TOKEN for auth mode
+      NDD_AUTH_TOKEN: ""
+      NDD_LOG_LEVEL: "info"
     volumes:
-      - endee-data:/data
-    restart: unless-stopped
+      - endee_data:/data
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
-      interval: 15s
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/api/v1/indexes" ]
+      interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
 volumes:
-  endee-data:
+  endee_data:
     driver: local

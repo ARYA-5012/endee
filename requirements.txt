@@ -1,7 +1,9 @@
 streamlit>=1.40.0
 sentence-transformers>=2.7.0
-endee>=0.1.0
+endee>=0.1.14
 requests>=2.31.0
 pygments>=2.17.0
 python-dotenv>=1.0.0
 numpy>=1.24.0
+fastapi>=0.115.0
+uvicorn>=0.34.0

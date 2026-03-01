@@ -1,13 +1,13 @@
 # docker-compose.full.yml
-# ───────────────────────
-# Option B: Full stack — Endee + DevSearch app in a single compose file.
+# ────────────────────────
+# Option B: Full-stack — Endee + FastAPI backend + Streamlit frontend, all in Docker.
 #
-#   docker compose -f docker-compose.full.yml up --build
+#   docker compose -f docker-compose.full.yml up -d --build
 #
-# DevSearch will be available at http://localhost:8501
-# Endee will be available at http://localhost:8080
-#
-# Required: copy .env.example to .env and fill in OPENROUTER_API_KEY
+# Access:
+#   Streamlit UI : http://localhost:8501
+#   FastAPI Docs : http://localhost:8000/docs
+#   Endee        : http://localhost:8080
 
 version: "3.9"
 
@@ -15,54 +15,59 @@ services:
 
   # ── Vector database ─────────────────────────────────────────────────────────
   endee:
-    image: endeeio/endee-server:latest
-    container_name: endee-server
+    image: endeeio/endee:latest
+    container_name: devsearch-endee
     ports:
       - "8080:8080"
-    ulimits:
-      nofile: 100000
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "200m"
-        max-file: "5"
     environment:
-      NDD_NUM_THREADS: 0
-      NDD_AUTH_TOKEN: "${ENDEE_AUTH_TOKEN:-}"
+      NDD_AUTH_TOKEN: ""
+      NDD_LOG_LEVEL: "info"
     volumes:
-      - endee-data:/data
-    restart: unless-stopped
+      - endee_data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 15s
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/api/v1/indexes" ]
+      interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
-  # ── DevSearch Streamlit app ──────────────────────────────────────────────────
-  devsearch:
+  # ── FastAPI backend ─────────────────────────────────────────────────────────
+  api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: devsearch-app
+    container_name: devsearch-api
+    command: [ "uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000" ]
     ports:
-      - "8501:8501"
+      - "8000:8000"
     environment:
-      # Use Docker service name to reach Endee on the internal network
       ENDEE_BASE_URL: "http://endee:8080/api/v1"
-      ENDEE_AUTH_TOKEN: "${ENDEE_AUTH_TOKEN:-}"
-      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"
+      ENDEE_AUTH_TOKEN: ""
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       OPENROUTER_MODEL: "${OPENROUTER_MODEL:-google/gemini-flash-1.5}"
       GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
     depends_on:
       endee:
         condition: service_healthy
     restart: unless-stopped
-    volumes:
-      # Mount model cache so the embedding model isn't re-downloaded on restart
-      - model-cache:/root/.cache/huggingface
+
+  # ── Streamlit frontend ─────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: devsearch-app
+    command: [ "streamlit", "run", "app/main.py", "--server.port=8501", "--server.headless=true", "--server.address=0.0.0.0" ]
+    ports:
+      - "8501:8501"
+    environment:
+      DEVSEARCH_API_URL: "http://api:8000"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+    depends_on:
+      - api
+    restart: unless-stopped
 
 volumes:
-  endee-data:
-    driver: local
-  model-cache:
+  endee_data:
     driver: local

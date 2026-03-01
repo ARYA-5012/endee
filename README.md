@@ -3,6 +3,7 @@
 > **Search any GitHub repository with plain English. No grep. No keywords. Just meaning.**
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi)](https://fastapi.tiangolo.com)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.40+-red?logo=streamlit)](https://streamlit.io)
 [![Endee](https://img.shields.io/badge/Vector_DB-Endee-6366f1)](https://github.com/endee-io/endee)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
@@ -40,46 +41,56 @@ Traditional tools fail here. `grep` requires you to know the exact symbol name. 
 
 ## 🏗️ System Architecture
 
+DevSearch uses a **3-tier architecture**: Streamlit frontend → FastAPI REST backend → Core pipeline → Endee vector DB.
+
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         USER INTERFACE                          │
-│              Streamlit (localhost:8501)                         │
-│   ┌──────────┐  ┌──────────────┐  ┌──────────────────────┐    │
-│   │🏠 Ingest │  │ 🔍 Search    │  │ 🤖 Ask (RAG Q&A)     │    │
-│   └────┬─────┘  └──────┬───────┘  └──────────┬───────────┘    │
-└────────┼───────────────┼──────────────────────┼────────────────┘
-         │               │                      │
-         ▼               │                      │
-┌────────────────┐       │               ┌──────▼────────────────┐
-│  GitHub API    │       │               │  OpenRouter API       │
-│  (REST, HTTPS) │       │               │  google/gemini-flash  │
-│                │       │               └──────────────────────┘
-│ repo_loader.py │       │
-└───────┬────────┘       │
-        │ CodeFile[]     │
-        ▼                │
-┌───────────────┐        │
-│  chunker.py   │        │
-│  ─────────────│        │
-│  Python → AST │        │
-│  Others → SW  │        │  embed_single(query)
-└───────┬───────┘        │         │
-        │ CodeChunk[]    │         │
-        ▼                │         ▼
-┌───────────────┐  ┌─────▼──────────────────────────────────────┐
-│  embedder.py  │  │            ENDEE VECTOR DATABASE            │
-│  ─────────────│  │           (localhost:8080)                  │
-│  MiniLM-L6-v2 │  │                                             │
-│  384-dim vecs │──│──▶  upsert(id, vector, meta)               │
-└───────────────┘  │                                             │
-                   │     query(vector, top_k)  ◀────────────────│
-                   │         │                                   │
-                   │         ▼                                   │
-                   │   SearchResult[]                            │
-                   │   {code, file_path, function_name,          │
-                   │    start_line, end_line, similarity}        │
-                   └─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                     STREAMLIT FRONTEND (:8501)                   │
+│  ┌──────────┐  ┌───────────────┐  ┌────────────┐  ┌──────────┐ │
+│  │🏠 Ingest │  │ 🔍 Search     │  │ 🤖 Ask     │  │📦 Indexes│ │
+│  └─────┬────┘  └──────┬────────┘  └─────┬──────┘  └────┬─────┘ │
+└────────┼──────────────┼─────────────────┼───────────────┼───────┘
+         │  HTTP/JSON   │                 │               │
+         ▼              ▼                 ▼               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                   FASTAPI REST API (:8000)                        │
+│                                                                  │
+│  POST /api/ingest    GET /api/indexes    POST /api/search        │
+│  POST /api/ask       DELETE /api/indexes/{repo}                  │
+│  GET  /api/health                                                │
+│                                                                  │
+│  ┌──────────────┐  ┌─────────────┐  ┌───────────────┐           │
+│  │ repo_loader  │  │  chunker    │  │   embedder    │           │
+│  │ (GitHub API) │  │ (AST / SW)  │  │ (MiniLM-L6)   │           │
+│  └──────────────┘  └─────────────┘  └───────────────┘           │
+│         │                                    │                   │
+│         │          ┌──────────────┐           │                   │
+│         └─────────▶│  rag.py      │◀──────────┘                   │
+│                    │ (OpenRouter) │                               │
+│                    └──────────────┘                               │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                  ENDEE VECTOR DATABASE (:8080)                    │
+│                                                                  │
+│   create_index() · upsert(id, vector, meta) · query(vector, k)  │
+│   384-dim cosine · INT8 quantized · HNSW · up to 1B vectors     │
+└──────────────────────────────────────────────────────────────────┘
 ```
+
+### API Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/health` | System health + Endee connectivity check |
+| `GET` | `/api/indexes` | List all indexed repositories |
+| `DELETE` | `/api/indexes/{owner}/{repo}` | Delete an index |
+| `POST` | `/api/ingest` | Index a GitHub repository |
+| `POST` | `/api/search` | Semantic code search |
+| `POST` | `/api/ask` | RAG Q&A with Gemini Flash |
+
+Interactive API docs (Swagger UI) are available at `http://localhost:8000/docs`.
 
 ### Data Flow
 
@@ -96,12 +107,12 @@ Traditional tools fail here. `grep` requires you to know the exact symbol name. 
 Endee replaces traditional vector stores (FAISS, ChromaDB, Pinecone) as the core retrieval engine. Here's what makes it the right choice for DevSearch:
 
 ### Index per Repository
-Each GitHub repo gets its own Endee index, named `owner--repo`. This keeps searches scoped and enables fast multi-repo switching without performance degradation.
+Each GitHub repo gets its own Endee index, named `owner___repo` (triple-underscore separator, collision-safe). This keeps searches scoped and enables fast multi-repo switching without performance degradation.
 
 ```python
 # endee_client.py
 client.create_index(
-    name="tiangolo--fastapi",
+    name="tiangolo___fastapi",
     dimension=384,           # matches all-MiniLM-L6-v2 output
     space_type="cosine",     # cosine similarity for normalized vectors
     precision=Precision.INT8 # quantized for low memory footprint
@@ -144,6 +155,7 @@ Endee is designed to handle **1 billion vectors on a single node** with HNSW ind
 | Layer | Technology | Role |
 |---|---|---|
 | **Vector DB** | [Endee](https://github.com/endee-io/endee) | Stores & searches 384-dim code embeddings |
+| **API Backend** | [FastAPI](https://fastapi.tiangolo.com) | REST API with auto-generated Swagger docs |
 | **Embeddings** | `all-MiniLM-L6-v2` (HuggingFace) | 384-dim semantic vectors for code + queries |
 | **Code Chunking** | Python `ast` + sliding window | AST-based for Python, windowed for all others |
 | **LLM (RAG)** | Gemini Flash via OpenRouter | Generates grounded answers from retrieved code |
@@ -169,8 +181,8 @@ Endee is designed to handle **1 billion vectors on a single node** with HNSW ind
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/devsearch.git
-cd devsearch
+git clone https://github.com/ARYA-5012/endee.git
+cd endee
 ```
 
 ### 2. Start Endee
@@ -179,7 +191,7 @@ cd devsearch
 docker compose up -d
 ```
 
-Endee is now running at `http://localhost:8080`. You can view its dashboard there.
+Endee is now running at `http://localhost:8080`.
 
 ### 3. Configure environment
 
@@ -198,7 +210,15 @@ OPENROUTER_API_KEY=sk-or-v1-your-key-here
 pip install -r requirements.txt
 ```
 
-### 5. Launch DevSearch
+### 5. Start the FastAPI backend
+
+```bash
+uvicorn api.server:app --host 0.0.0.0 --port 8000 --reload
+```
+
+API docs available at **http://localhost:8000/docs**
+
+### 6. Launch the Streamlit UI
 
 ```bash
 streamlit run app/main.py
@@ -213,8 +233,8 @@ Open **http://localhost:8501** in your browser. 🎉
 ### 1. Clone & configure
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/devsearch.git
-cd devsearch
+git clone https://github.com/ARYA-5012/endee.git
+cd endee
 cp .env.example .env
 # Edit .env — set OPENROUTER_API_KEY at minimum
 ```
@@ -227,8 +247,9 @@ docker compose -f docker-compose.full.yml up --build
 
 | Service | URL |
 |---|---|
-| DevSearch (Streamlit) | http://localhost:8501 |
-| Endee (Vector DB + Dashboard) | http://localhost:8080 |
+| DevSearch (Streamlit UI) | http://localhost:8501 |
+| FastAPI Backend (Swagger) | http://localhost:8000/docs |
+| Endee (Vector DB) | http://localhost:8080 |
 
 To stop:
 ```bash
@@ -296,10 +317,15 @@ python scripts/ingest_repo.py https://github.com/tiangolo/fastapi \
 ## 📁 Project Structure
 
 ```
-devsearch/
+endee/
 │
-├── app/                            # Streamlit application
+├── api/                            # FastAPI REST backend
+│   ├── __init__.py
+│   └── server.py                   # 6 REST endpoints + Swagger docs
+│
+├── app/                            # Streamlit frontend
 │   ├── main.py                     # 🏠 Home — repo ingestion UI
+│   ├── styles.py                   # Shared CSS (all pages)
 │   └── pages/
 │       ├── 1_🔍_Search.py          # Semantic search page
 │       ├── 2_🤖_Ask.py             # RAG Q&A page
@@ -319,9 +345,9 @@ devsearch/
 ├── .streamlit/
 │   └── config.toml                 # Dark theme + server config
 │
-├── Dockerfile                      # DevSearch app container
-├── docker-compose.yml              # Endee only (app runs locally)
-├── docker-compose.full.yml         # Full stack (Endee + app)
+├── Dockerfile                      # Container image
+├── docker-compose.yml              # Endee only (dev mode)
+├── docker-compose.full.yml         # Full stack (Endee + API + UI)
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -337,6 +363,7 @@ All configuration is via environment variables (`.env` file or Docker environmen
 |---|---|---|
 | `ENDEE_BASE_URL` | `http://localhost:8080/api/v1` | Endee server URL |
 | `ENDEE_AUTH_TOKEN` | *(empty)* | Endee auth token (if set at startup) |
+| `DEVSEARCH_API_URL` | `http://localhost:8000` | FastAPI backend URL (used by Streamlit) |
 | `OPENROUTER_API_KEY` | *(required for Ask)* | OpenRouter API key |
 | `OPENROUTER_MODEL` | `google/gemini-flash-1.5` | LLM model for RAG |
 | `GITHUB_TOKEN` | *(optional)* | GitHub PAT for higher rate limits |

@@ -214,5 +214,21 @@ Pull requests are welcome! Potential areas for contribution:
 - Add GitHub private repo support via OAuth.
 - Add a diff-based re-indexing mode for massive mono-repos.
 
+---
+
+## 👨‍💻 Author
+
+<table>
+<tr>
+<td align="center">
+<strong>Arya Yadav</strong><br>
+Bennett University<br>
+<a href="mailto:aryayadav5012@gmail.com">📧 Email</a> |
+<a href="https://github.com/ARYA-5012">🐙 GitHub</a>
+</td>
+</tr>
+</table>
+
+---
 ## 📄 License
 MIT License — see [LICENSE](LICENSE) for details.

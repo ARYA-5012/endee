@@ -70,7 +70,7 @@ with st.sidebar:
     st.divider()
     # ── API + Endee connection status ─────────────────────────────────────────
     try:
-        resp = requests.get(f"{api_url}/api/health", timeout=5)
+        resp = requests.get(f"{api_url}/api/health", timeout=15)
         data = resp.json()
         if data.get("endee_connected"):
             st.success(f"✅ API + Endee connected ({data['index_count']} indexes)")
